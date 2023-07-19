@@ -96,7 +96,7 @@ void virtio_describe(struct virtio_device *dev, const char *msg,
 
 int virtio_create_virtqueues(struct virtio_device *vdev, unsigned int flags,
 			     unsigned int nvqs, const char *names[],
-			     vq_callback callbacks[])
+			     vq_callback callbacks[], ...)
 {
 	struct virtio_vring_info *vring_info;
 	struct vring_alloc_info *vring_alloc;
@@ -108,8 +108,11 @@ int virtio_create_virtqueues(struct virtio_device *vdev, unsigned int flags,
 		return -EINVAL;
 
 	if (vdev->func && vdev->func->create_virtqueues) {
+		va_list args;
+		va_start(args, callbacks);
+		void **callback_args = va_arg(args, void *);
 		return vdev->func->create_virtqueues(vdev, flags, nvqs,
-						     names, callbacks);
+						     names, callbacks, callback_args);
 	}
 
 	num_vrings = vdev->vrings_num;
