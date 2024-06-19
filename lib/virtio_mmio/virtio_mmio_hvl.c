@@ -104,7 +104,7 @@ int virtio_mmio_hvl_wait_cfg(struct virtio_device *vdev, int offset, uint32_t da
 		return 0;
 	}
 
-	val = metal_io_read32(vmdev->cfg_io, offset);
+	val = metal_io_read32(&vmdev->cfg_io, offset);
 
 	if (val == data) {
 		return 0;
@@ -112,7 +112,7 @@ int virtio_mmio_hvl_wait_cfg(struct virtio_device *vdev, int offset, uint32_t da
 
 	vmdev->hvl_func->hvl_wait_cfg_event(vdev, 4000000);
 
-	val = metal_io_read32(vmdev->cfg_io, offset);
+	val = metal_io_read32(&vmdev->cfg_io, offset);
 	if (val == data) {
 		return 0;
 	}
