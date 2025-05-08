@@ -43,14 +43,17 @@ static inline uint8_t virtio_mmio_read8(struct virtio_device *vdev, int offset)
 	return metal_io_read8(&vmdev->cfg_io, offset);
 }
 
-static inline void virtio_mmio_set_status(struct virtio_device *vdev, uint8_t status)
-{
-	virtio_mmio_write32(vdev, VIRTIO_MMIO_STATUS, status);
-}
-
 static uint8_t virtio_mmio_get_status(struct virtio_device *vdev)
 {
 	return virtio_mmio_read32(vdev, VIRTIO_MMIO_STATUS);
+}
+
+static inline void virtio_mmio_set_status(struct virtio_device *vdev, uint8_t status)
+{
+	if (status != VIRTIO_CONFIG_STATUS_RESET)
+		status |= virtio_mmio_get_status(vdev);
+
+	virtio_mmio_write32(vdev, VIRTIO_MMIO_STATUS, status);
 }
 
 static void virtio_mmio_write_config(struct virtio_device *vdev,
@@ -120,7 +123,7 @@ static void virtio_mmio_reset_device(struct virtio_device *vdev)
 	virtio_mmio_set_status(vdev, 0);
 }
 
-static void virtio_mmio_notify(struct virtqueue *vq)
+static void virtio_mmio_drv_notify(struct virtqueue *vq)
 {
 	/* VIRTIO_F_NOTIFICATION_DATA is not supported for now */
 	virtio_mmio_write32(vq->vq_dev, VIRTIO_MMIO_QUEUE_NOTIFY, vq->vq_queue_index);
@@ -135,7 +138,7 @@ const struct virtio_dispatch virtio_mmio_dispatch = {
 	.read_config = virtio_mmio_read_config,
 	.write_config = virtio_mmio_write_config,
 	.reset_device = virtio_mmio_reset_device,
-	.notify = virtio_mmio_notify,
+	.notify = virtio_mmio_drv_notify,
 };
 
 static int virtio_mmio_get_metal_io(struct virtio_device *vdev, uintptr_t virt_mem_ptr,
@@ -194,9 +197,10 @@ int virtio_mmio_device_init(struct virtio_mmio_device *vmdev, uintptr_t virt_mem
 		return -1;
 	}
 
-	if (version != 1) {
-		metal_log(METAL_LOG_ERROR, "Bad version %08x\n", version);
-		return -1;
+	if (version == 1) {
+		metal_log(METAL_LOG_DEBUG, "VIRTIO MMIO version %08x (legacy)\n", version);
+	} else {
+		metal_log(METAL_LOG_DEBUG, "VIRTIO MMIO version %08x\n", version);
 	}
 
 	vendor = virtio_mmio_read32(vdev, VIRTIO_MMIO_VENDOR_ID);
@@ -207,7 +211,10 @@ int virtio_mmio_device_init(struct virtio_mmio_device *vmdev, uintptr_t virt_mem
 	vdev->id.vendor = vendor;
 
 	virtio_mmio_set_status(vdev, VIRTIO_CONFIG_STATUS_ACK);
-	virtio_mmio_write32(vdev, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
+
+	if (version == 1) {
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_GUEST_PAGE_SIZE, 4096);
+	}
 
 	return 0;
 }
@@ -233,6 +240,7 @@ struct virtqueue *virtio_mmio_setup_virtqueue(struct virtio_device *vdev,
 					      const char *vq_name)
 {
 	uint32_t maxq;
+	metal_phys_addr_t paddr = 0;
 	struct virtio_vring_info _vring_info = {0};
 	struct virtio_vring_info *vring_info = &_vring_info;
 	struct vring_alloc_info *vring_alloc_info;
@@ -247,12 +255,6 @@ struct virtqueue *virtio_mmio_setup_virtqueue(struct virtio_device *vdev,
 	if (!vq) {
 		metal_log(METAL_LOG_ERROR,
 			  "Only preallocated virtqueues are currently supported\n");
-		return NULL;
-	}
-
-	if (vdev->id.version != 0x1) {
-		metal_log(METAL_LOG_ERROR,
-			  "Only VIRTIO MMIO version 1 is currently supported\n");
 		return NULL;
 	}
 
@@ -295,11 +297,24 @@ struct virtqueue *virtio_mmio_setup_virtqueue(struct virtio_device *vdev,
 	VIRTIO_ASSERT((maxq >= vq->vq_nentries),
 		      "VIRTIO_MMIO_QUEUE_NUM_MAX must be greater than vqueue->vq_nentries");
 	virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_NUM, vq->vq_nentries);
-	virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_ALIGN, 4096);
-	virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_PFN,
-			    ((uintptr_t)metal_io_virt_to_phys(&vmdev->shm_io,
-			    (char *)vq->vq_ring.desc)) / 4096);
 
+	if (vdev->id.version == 1) {
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_ALIGN, 4096);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_PFN,
+				    ((uintptr_t)metal_io_virt_to_phys(&vmdev->shm_io,
+				    (char *)vq->vq_ring.desc)) / 4096);
+	} else {
+		paddr = metal_io_virt_to_phys(&vmdev->shm_io, vq->vq_ring.desc);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_DESC_LOW, paddr);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_DESC_HIGH, paddr >> 32);
+		paddr = metal_io_virt_to_phys(vq->shm_io, vq->vq_ring.avail);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_AVAIL_LOW, paddr);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_AVAIL_HIGH, paddr >> 32);
+		paddr = metal_io_virt_to_phys(vq->shm_io, vq->vq_ring.used);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_USED_LOW, paddr);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_USED_HIGH, paddr >> 32);
+		virtio_mmio_write32(vdev, VIRTIO_MMIO_QUEUE_READY, 1);
+	}
 	vdev->vrings_info[vdev->vrings_num].vq = vq;
 	vdev->vrings_num++;
 	virtqueue_enable_cb(vq);
@@ -310,7 +325,6 @@ struct virtqueue *virtio_mmio_setup_virtqueue(struct virtio_device *vdev,
 void virtio_mmio_isr(struct virtio_device *vdev)
 {
 	struct virtio_vring_info *vrings_info = vdev->vrings_info;
-
 	uint32_t isr = virtio_mmio_read32(vdev, VIRTIO_MMIO_INTERRUPT_STATUS);
 	struct virtqueue *vq;
 	unsigned int i;
